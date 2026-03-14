@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langgraph-project"
+version = "0.1.0"
+description = "A simple LangGraph project"
+dependencies = [
+    "langgraph",
+]
