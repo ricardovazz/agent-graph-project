@@ -8,6 +8,5 @@
         "https://docs.langchain.com/mcp"
       ]
     }
-  },
-  "$version": 3
+  }
 }
