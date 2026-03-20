@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "langchain": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@latest",
+        "https://docs.langchain.com/mcp"
+      ]
+    }
+  }
+}

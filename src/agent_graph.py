@@ -1,94 +1,96 @@
-from langgraph.graph import StateGraph, END
 from langchain.agents import create_agent
-from langchain_core.language_models.fake import FakeListLLM
-from langchain_core.tools import tool
-from langchain_core.prompts import SystemMessagePromptTemplate
-from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated, List
 from operator import add
 
 # Define state
 class State(TypedDict):
-    messages: Annotated[list[BaseMessage], add]
+    messages: Annotated[list, add]
 
-# Mock LLM for demo (replace with real model like OpenAI)
-llm = FakeListLLM(responses=["delegate", "handle"])
+# Create subagents
+research_agent = create_agent(
+    model=FakeListChatModel(responses=["Research results: Found relevant information about AI history."]),
+    tools=[],
+    system_prompt="You are a research specialist. Find and summarize information."
+)
 
-# Define a simple tool
+writer_agent = create_agent(
+    model=FakeListChatModel(responses=["Written content: Here's the drafted blog post about machine learning."]),
+    tools=[],
+    system_prompt="You are a writing specialist. Create and edit content."
+)
+
+# Registry of available sub-agents
+SUBAGENTS = {
+    "research": research_agent,
+    "writer": writer_agent,
+}
+
+# Single dispatch tool for subagent invocation
 @tool
-def example_tool(query: str) -> str:
-    """A simple example tool that echoes the query."""
-    return f"Echo: {query}"
+def task(agent_name: str, description: str) -> str:
+    """Launch an ephemeral subagent for a task.
 
-# System prompts
-orchestrator_prompt = (
-    "You are the orchestrator agent. Your job is to decide if the task should be handled by the worker agent. "
-    "If the user message contains 'task', respond with 'delegate'. Otherwise, respond with 'handle'."
-)
+    Available agents:
+    - research: Research and fact-finding
+    - writer: Content creation and editing
+    """
+    agent = SUBAGENTS[agent_name]
+    result = agent.invoke({
+        "messages": [
+            {"role": "user", "content": description}
+        ]
+    })
+    return result["messages"][-1].content
 
-worker_prompt = (
-    "You are the worker agent. You have access to tools. "
-    "Use them to complete tasks efficiently. Always provide helpful responses."
-)
-
-# Create the orchestrator agent
-orchestrator_agent = create_agent(
-    model=llm,
-    tools=[],  # No tools for orchestrator, it just decides
-    system_prompt=orchestrator_prompt
-)
-
-# Create the worker agent
-worker_agent = create_agent(
-    model=FakeListLLM(responses=["I am the worker agent. Task completed using tools."]),
-    tools=[],  # No tools for demo
-    system_prompt=worker_prompt
-)
-def orchestrator(state: State):
-    # Call the orchestrator agent
-    response = orchestrator_agent.invoke({"messages": state["messages"]})
-    last_response = response["messages"][-1].content.lower()
-    if "delegate" in last_response:
-        return {"messages": [AIMessage(content="Delegating to worker agent.")]}
+# Supervisor node that coordinates sub-agents
+def supervisor(state: State) -> State:
+    """Supervisor that decides which subagent to call."""
+    messages = state["messages"]
+    last_content = messages[-1].content.lower() if messages else ""
+    
+    # Simple routing logic (in production, the LLM decides via tool calling)
+    if "research" in last_content:
+        result = task.invoke({"agent_name": "research", "description": last_content})
+        return {"messages": [AIMessage(content=f"Delegated to research agent: {result}")]}
+    elif "write" in last_content or "blog" in last_content:
+        result = task.invoke({"agent_name": "writer", "description": last_content})
+        return {"messages": [AIMessage(content=f"Delegated to writer agent: {result}")]}
     else:
-        return {"messages": [AIMessage(content="I can handle this directly as orchestrator.")]}  # This won't be reached in routing, but for completeness
+        return {"messages": [AIMessage(content="Hello! How can I help you today?")]}
 
-# Worker function
-def worker(state: State):
-    # Call the agent
-    response = worker_agent.invoke({"messages": state["messages"]})
-    return {"messages": [AIMessage(content=response["messages"][-1].content)]}
-
-# Create graph
+# Create graph with LangGraph
 graph = StateGraph(State)
-
-# Add nodes
-graph.add_node("orchestrator", orchestrator)
-graph.add_node("worker", worker)
-
-# Add edges
-graph.add_conditional_edges(
-    "orchestrator",
-    lambda state: "worker" if "task" in state["messages"][0].content.lower() else END
-)
-graph.add_edge("worker", END)
-
-# Set entry
-graph.set_entry_point("orchestrator")
-
-# Compile
+graph.add_node("supervisor", supervisor)
+graph.set_entry_point("supervisor")
+graph.add_edge("supervisor", END)
 app = graph.compile()
 
 # Example usage
 if __name__ == "__main__":
-    # Test with a task
-    result = app.invoke({"messages": [HumanMessage(content="Handle this task")]})
-    print("Final messages:")
+    # Test with a research request
+    print("=" * 50)
+    print("Test 1: Research request")
+    print("=" * 50)
+    result = app.invoke({"messages": [HumanMessage(content="Research the history of AI")]})
     for msg in result["messages"]:
         print(f"{msg.type}: {msg.content}")
 
-    # Test without task
-    result2 = app.invoke({"messages": [HumanMessage(content="Hello")]})
-    print("\nFinal messages:")
+    # Test with a writing request
+    print("\n" + "=" * 50)
+    print("Test 2: Writing request")
+    print("=" * 50)
+    result2 = app.invoke({"messages": [HumanMessage(content="Write a blog post about machine learning")]})
     for msg in result2["messages"]:
+        print(f"{msg.type}: {msg.content}")
+
+    # Test with a greeting
+    print("\n" + "=" * 50)
+    print("Test 3: Greeting")
+    print("=" * 50)
+    result3 = app.invoke({"messages": [HumanMessage(content="Hello")]})
+    for msg in result3["messages"]:
         print(f"{msg.type}: {msg.content}")
