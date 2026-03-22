@@ -74,6 +74,14 @@ frontend/tsconfig.tsbuildinfo
 debug_*.py
 test_*.py
 
+# LangGraph
+.langgraph_api/
+.langgraph_checkpoint*.pckl
+.langgraph_ops.pckl
+.langgraph_retry_counter.pckl
+store.pckl
+store.vectors.pckl
+
 # OS
 Thumbs.db
 .DS_Store
