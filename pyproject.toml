@@ -5,10 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "langgraph-project"
 version = "0.1.0"
-description = "A simple LangGraph project"
+description = "A LangGraph project with interactive frontend"
 dependencies = [
     "langgraph",
+    "langchain",
     "langchain-openai",
+    "langchain-core",
     "fastapi",
-    "uvicorn",
+    "uvicorn[standard]",
+    "websockets",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+start-server = "src.server:main"

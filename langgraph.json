@@ -1,0 +1,11 @@
+{
+  "dependencies": [
+    ".",
+    "langchain",
+    "langchain-openai"
+  ],
+  "graphs": {
+    "agent": "src.agent_graph:app"
+  },
+  "env": ".env"
+}
