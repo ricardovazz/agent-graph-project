@@ -67,19 +67,36 @@ def task(agent_name: str, description: str) -> str:
     return result["messages"][-1].content
 
 
+# Example: Async tool that directly invokes a subagent (no dispatcher)
+@tool
+async def async_research(query: str) -> str:
+    """Async research tool that directly calls the research subagent.
+
+    Use this for non-blocking research queries.
+    """
+    result = await research_agent.ainvoke({
+        "messages": [
+            {"role": "user", "content": query}
+        ]
+    })
+    return result["messages"][-1].content
+
+
 def create_supervisor_agent():
     """Create supervisor agent that uses tool calling to delegate to subagents."""
     supervisor_agent = create_agent(
         model=get_llm(),
-        tools=[task],
+        tools=[task, async_research],
         system_prompt=(
             "You are a supervisor coordinating specialized sub-agents to complete tasks. "
             "Available sub-agents:\n"
             "- research: Research and fact-finding tasks\n"
             "- writer: Content creation and editing tasks\n\n"
-            "Use the 'task' tool to delegate work to the appropriate sub-agent. "
-            "Always provide the agent_name and a clear description of what needs to be done. "
-            "After receiving results from sub-agents, synthesize them into a coherent response. "
+            "Tools available:\n"
+            "- 'task': Delegate to a sub-agent by name (research or writer)\n"
+            "- 'async_research': Non-blocking research for queries\n\n"
+            "Use the appropriate tool for the task. After receiving results, "
+            "synthesize them into a coherent response. "
             "For simple greetings or questions that don't require specialization, respond directly."
         ),
     )
@@ -89,9 +106,9 @@ def create_supervisor_agent():
 supervisor_agent = create_supervisor_agent()
 
 
-def supervisor(state: State) -> State:
+async def supervisor(state: State) -> State:
     """Supervisor node that coordinates sub-agents."""
-    response = supervisor_agent.invoke({"messages": state["messages"]})
+    response = await supervisor_agent.ainvoke({"messages": state["messages"]})
     return {"messages": [response["messages"][-1]]}
 
 # Create graph with LangGraph
@@ -102,7 +119,8 @@ graph.add_edge("supervisor", END)
 app = graph.compile()
 
 if __name__ == "__main__":
+    import asyncio
     from langchain_core.messages import HumanMessage
-    result = app.invoke({"messages": [HumanMessage(content="Research the history of AI")]})
+    result = asyncio.run(app.ainvoke({"messages": [HumanMessage(content="Research the history of AI")]}))
     for msg in result["messages"]:
         print(f"{msg.type}: {msg.content}")
