@@ -2,7 +2,8 @@
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, Annotated, Optional, Literal
+from typing import Annotated, Optional, Literal
+from typing_extensions import TypedDict
 from operator import add
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -10,6 +11,7 @@ import uuid
 import asyncio
 import threading
 import os
+from langsmith.utils import ContextThreadPoolExecutor
 
 
 # =============================================================================
@@ -40,27 +42,28 @@ class JobResult:
 
 class JobStorage:
     """In-memory storage for tracking background jobs."""
-    
+
     def __init__(self):
         self._jobs: dict[str, JobResult] = {}
-        self._threads: dict[str, threading.Thread] = {}
-    
+        self._futures: dict[str, any] = {}
+        self._executor: ContextThreadPoolExecutor = ContextThreadPoolExecutor(max_workers=10)
+
     def create_job(self, job_id: str) -> JobResult:
         job = JobResult(job_id=job_id, status="pending")
         self._jobs[job_id] = job
         return job
-    
+
     def get_job(self, job_id: str) -> Optional[JobResult]:
         return self._jobs.get(job_id)
-    
-    def register_thread(self, job_id: str, thread: threading.Thread) -> None:
-        self._threads[job_id] = thread
-    
-    def get_thread(self, job_id: str) -> Optional[threading.Thread]:
-        return self._threads.get(job_id)
-    
-    def update_status(self, job_id: str, status: JobStatus, 
-                      result: Optional[str] = None, 
+
+    def register_future(self, job_id: str, future: any) -> None:
+        self._futures[job_id] = future
+
+    def get_future(self, job_id: str) -> Optional[any]:
+        return self._futures.get(job_id)
+
+    def update_status(self, job_id: str, status: JobStatus,
+                      result: Optional[str] = None,
                       error: Optional[str] = None) -> None:
         job = self._jobs.get(job_id)
         if job:
@@ -127,18 +130,18 @@ SUBAGENTS = {
 @tool
 def start_job(agent_name: str, description: str) -> str:
     """Start a background job and return a job ID.
-    
+
     Args:
         agent_name: Name of the subagent to use ('research' or 'writer')
         description: Detailed description of what the job should accomplish
     """
     if agent_name not in SUBAGENTS:
         return f"Unknown agent: {agent_name}. Available: {list(SUBAGENTS.keys())}"
-    
+
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     job_storage.create_job(job_id)
     job_storage.update_status(job_id, "running")
-    
+
     def run_job():
         try:
             agent = SUBAGENTS[agent_name]
@@ -149,43 +152,46 @@ def start_job(agent_name: str, description: str) -> str:
                     "messages": [{"role": "user", "content": description}]
                 }))
                 job_storage.update_status(
-                    job_id, "completed", 
+                    job_id, "completed",
                     result=result["messages"][-1].content
                 )
             finally:
                 loop.close()
         except Exception as e:
             job_storage.update_status(job_id, "failed", error=str(e))
-    
-    thread = threading.Thread(target=run_job, daemon=True, name=f"job_{job_id}")
-    job_storage.register_thread(job_id, thread)
-    thread.start()
-    
+
+    # Submit to ContextThreadPoolExecutor for proper LangSmith context propagation
+    future = job_storage._executor.submit(run_job)
+    job_storage.register_future(job_id, future)
+
     return f"Job started: {job_id}. Use check_status to monitor progress."
 
 
 @tool
 def check_status(job_id: str) -> str:
     """Check the status of a background job.
-    
+
     Args:
         job_id: The job ID returned from start_job
     """
     job = job_storage.get_job(job_id)
     if not job:
         return f"Job not found: {job_id}"
-    
-    thread = job_storage.get_thread(job_id)
-    if thread and not thread.is_alive() and job.status == "running":
-        job_storage.update_status(job_id, "failed", error="Thread terminated unexpectedly")
+
+    future = job_storage.get_future(job_id)
+    if future and future.done() and job.status == "running":
+        if future.exception():
+            job_storage.update_status(job_id, "failed", error=str(future.exception()))
+        else:
+            job_storage.update_status(job_id, "completed", result="Result available")
         job = job_storage.get_job(job_id)
-    
+
     status_info = f"Job {job_id}: {job.status}"
     if job.status == "completed":
         status_info += f" (finished at {job.completed_at})"
     elif job.status == "failed":
         status_info += f" - Error: {job.error}"
-    
+
     return status_info
 
 
