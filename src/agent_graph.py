@@ -10,6 +10,7 @@ import uuid
 import asyncio
 import threading
 import os
+from langchain_core.messages import HumanMessage, AIMessage
 
 
 # =============================================================================
@@ -40,10 +41,30 @@ class JobResult:
 
 class JobStorage:
     """In-memory storage for tracking background jobs."""
-    
+
     def __init__(self):
         self._jobs: dict[str, JobResult] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._callbacks: list[callable] = []  # Callbacks for job status changes
+
+    def add_callback(self, callback: callable):
+        """Add a callback to be called when any job status changes."""
+        self._callbacks.append(callback)
+
+    def remove_callback(self, callback: callable):
+        """Remove a callback."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+    def _notify_callbacks(self, job_id: str):
+        """Notify all callbacks of a job status change."""
+        job = self._jobs.get(job_id)
+        if job:
+            for callback in self._callbacks:
+                try:
+                    callback(job_id, job)
+                except Exception:
+                    pass  # Don't let callback errors affect job execution
     
     def create_job(self, job_id: str) -> JobResult:
         job = JobResult(job_id=job_id, status="pending")
@@ -59,8 +80,8 @@ class JobStorage:
     def get_thread(self, job_id: str) -> Optional[threading.Thread]:
         return self._threads.get(job_id)
     
-    def update_status(self, job_id: str, status: JobStatus, 
-                      result: Optional[str] = None, 
+    def update_status(self, job_id: str, status: JobStatus,
+                      result: Optional[str] = None,
                       error: Optional[str] = None) -> None:
         job = self._jobs.get(job_id)
         if job:
@@ -71,6 +92,8 @@ class JobStorage:
                 job.error = error
             if status in ("completed", "failed"):
                 job.completed_at = datetime.now()
+            # Notify callbacks of status change
+            self._notify_callbacks(job_id)
 
 
 job_storage = JobStorage()
@@ -149,7 +172,7 @@ def start_job(agent_name: str, description: str) -> str:
                     "messages": [{"role": "user", "content": description}]
                 }))
                 job_storage.update_status(
-                    job_id, "completed", 
+                    job_id, "completed",
                     result=result["messages"][-1].content
                 )
             finally:
@@ -192,14 +215,14 @@ def check_status(job_id: str) -> str:
 @tool
 def get_result(job_id: str) -> str:
     """Get the result of a completed background job.
-    
+
     Args:
         job_id: The job ID returned from start_job
     """
     job = job_storage.get_job(job_id)
     if not job:
         return f"Job not found: {job_id}"
-    
+
     if job.status == "pending":
         return f"Job {job_id} is still pending."
     elif job.status == "running":
@@ -238,7 +261,8 @@ supervisor_agent = create_agent(
 async def supervisor(state: State) -> State:
     """Supervisor node that coordinates sub-agents."""
     response = await supervisor_agent.ainvoke({"messages": state["messages"]})
-    return {"messages": [response["messages"][-1]]}
+    # Return all messages including tool calls and tool results
+    return {"messages": response["messages"]}
 
 
 # =============================================================================
