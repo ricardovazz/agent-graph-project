@@ -11,9 +11,12 @@ dependencies = [
     "langchain",
     "langchain-openai",
     "langchain-core",
+    "langsmith",
     "fastapi",
     "uvicorn[standard]",
     "websockets",
+    "python-dotenv",
+    "typing_extensions",
 ]
 
 [project.optional-dependencies]

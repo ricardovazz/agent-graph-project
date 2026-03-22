@@ -12,6 +12,8 @@ import asyncio
 import threading
 import os
 from langsmith.utils import ContextThreadPoolExecutor
+from langchain_core.tracers.langchain import LangChainTracer
+from langsmith import Client
 
 
 # =============================================================================
@@ -80,6 +82,20 @@ job_storage = JobStorage()
 
 
 # =============================================================================
+# LangSmith Tracing Setup
+# =============================================================================
+
+# Initialize LangSmith tracer
+_langsmith_client = Client() if os.environ.get("LANGSMITH_API_KEY") else None
+_langchain_tracer = LangChainTracer(client=_langsmith_client) if _langsmith_client else None
+
+
+def _get_callbacks():
+    """Get callbacks for tracing if LangSmith is configured."""
+    return [_langchain_tracer] if _langchain_tracer else []
+
+
+# =============================================================================
 # LLM Setup
 # =============================================================================
 
@@ -105,16 +121,22 @@ def get_llm():
 # Subagents
 # =============================================================================
 
-research_agent = create_agent(
-    model=get_llm(),
-    tools=[],
-    system_prompt="You are a research specialist. Find and summarize information."
+def _create_agent_with_tracing(system_prompt: str):
+    """Create an agent with LangSmith tracing support."""
+    agent = create_agent(
+        model=get_llm(),
+        tools=[],
+        system_prompt=system_prompt
+    )
+    return agent
+
+
+research_agent = _create_agent_with_tracing(
+    "You are a research specialist. Find and summarize information."
 )
 
-writer_agent = create_agent(
-    model=get_llm(),
-    tools=[],
-    system_prompt="You are a writing specialist. Create and edit content."
+writer_agent = _create_agent_with_tracing(
+    "You are a writing specialist. Create and edit content."
 )
 
 SUBAGENTS = {
@@ -142,15 +164,20 @@ def start_job(agent_name: str, description: str) -> str:
     job_storage.create_job(job_id)
     job_storage.update_status(job_id, "running")
 
+    # Capture callbacks for LangSmith tracing
+    callbacks = _get_callbacks()
+
     def run_job():
         try:
             agent = SUBAGENTS[agent_name]
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                result = loop.run_until_complete(agent.ainvoke({
-                    "messages": [{"role": "user", "content": description}]
-                }))
+                # Pass callbacks to sub-agent for proper tracing
+                result = loop.run_until_complete(agent.ainvoke(
+                    {"messages": [{"role": "user", "content": description}]},
+                    config={"callbacks": callbacks} if callbacks else {}
+                ))
                 job_storage.update_status(
                     job_id, "completed",
                     result=result["messages"][-1].content
@@ -243,7 +270,9 @@ supervisor_agent = create_agent(
 
 async def supervisor(state: State) -> State:
     """Supervisor node that coordinates sub-agents."""
-    response = await supervisor_agent.ainvoke({"messages": state["messages"]})
+    callbacks = _get_callbacks()
+    config = {"callbacks": callbacks} if callbacks else {}
+    response = await supervisor_agent.ainvoke({"messages": state["messages"]}, config=config)
     return {"messages": [response["messages"][-1]]}
 
 
@@ -256,6 +285,44 @@ graph.add_node("supervisor", supervisor)
 graph.set_entry_point("supervisor")
 graph.add_edge("supervisor", END)
 app = graph.compile()
+
+
+# =============================================================================
+# Thread Management (LangSmith)
+# =============================================================================
+
+def get_thread_config(thread_id: Optional[str] = None) -> dict:
+    """
+    Get config dict with thread_id for LangSmith tracing.
+    
+    Args:
+        thread_id: Optional thread ID for grouping related runs in LangSmith.
+                   If not provided, each run is independent.
+    
+    Returns:
+        Config dict to pass to ainvoke/invoke for thread-aware tracing.
+    
+    Example:
+        config = get_thread_config("my-thread-id")
+        result = await app.ainvoke({"messages": [...]}, config=config)
+    """
+    config = {}
+    
+    # Add callbacks if LangSmith is configured
+    callbacks = _get_callbacks()
+    if callbacks:
+        config["callbacks"] = callbacks
+    
+    # Add thread_id for grouping related runs
+    if thread_id:
+        config["configurable"] = {"thread_id": thread_id}
+    
+    return config
+
+
+def create_thread_id() -> str:
+    """Generate a unique thread ID for grouping related runs."""
+    return f"thread_{uuid.uuid4().hex[:12]}"
 
 
 if __name__ == "__main__":
