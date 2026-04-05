@@ -1,4 +1,4 @@
-"""Agent graph with Three-tool pattern for background jobs."""
+"""Agent graph with Skills pattern and Three-tool pattern for background jobs."""
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
@@ -10,6 +10,12 @@ import uuid
 import asyncio
 import threading
 import os
+import logging
+from pathlib import Path
+
+from src.skills import SkillStore
+from src.skill_tools import create_skill_tools
+from src.prompts import SYSTEM_PROMPT
 
 
 # =============================================================================
@@ -211,26 +217,34 @@ def get_result(job_id: str) -> str:
 
 
 # =============================================================================
+# Skills System
+# =============================================================================
+
+# Initialize skill store and tools
+SKILLS_DIR = Path(__file__).parent.parent / "skills"
+skill_store = SkillStore(SKILLS_DIR)
+skill_store.scan()
+skill_tools = create_skill_tools(skill_store)
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
 # Supervisor Agent
 # =============================================================================
 
+# Combine skill tools with existing job tools
+all_tools = [start_job, check_status, get_result] + skill_tools
+
+# Build system prompt with skill catalog
+skill_catalog = skill_store.get_skill_catalog()
+
 supervisor_agent = create_agent(
     model=get_llm(),
-    tools=[start_job, check_status, get_result],
-    system_prompt=(
-        "You are a supervisor coordinating specialized sub-agents via background jobs.\n\n"
-        "Available sub-agents:\n"
-        "- research: Research and fact-finding tasks\n"
-        "- writer: Content creation and editing tasks\n\n"
-        "Tools (Three-tool pattern):\n"
-        "1. start_job(agent_name, description) - Start a background job, returns job ID\n"
-        "2. check_status(job_id) - Returns status: pending/running/completed/failed\n"
-        "3. get_result(job_id) - Retrieves the completed result\n\n"
-        "Workflow:\n"
-        "1. User requests a task → Call start_job with appropriate agent\n"
-        "2. User asks for status → Call check_status\n"
-        "3. User wants result → Call get_result (after job is completed)\n\n"
-        "For simple greetings or questions, respond directly without using tools."
+    tools=all_tools,
+    system_prompt=SYSTEM_PROMPT.format(
+        current_time=datetime.now().isoformat(),
+        skill_catalog=skill_catalog if skill_catalog else "No skills currently available."
     ),
 )
 
