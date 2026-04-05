@@ -6,6 +6,8 @@ tags:
   - analysis
   - information
   - synthesis
+  - specialist
+layer: 3
 ---
 
 # Research Skill

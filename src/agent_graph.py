@@ -1,4 +1,12 @@
-"""Agent graph with Skills pattern and Three-tool pattern for background jobs."""
+"""Agent graph with 3-Layer Skills pattern and Three-tool pattern for background jobs.
+
+This implements the proper multi-agent skills architecture:
+- Layer 1 (Capability Catalog): Supervisor knows what subagents can do
+- Layer 2 (Process Skills): Same business process, different views per role
+- Layer 3 (Specialist Skills): Subagents own execution expertise
+
+Reference: SKILLS-3LAYER-PATTERN.md
+"""
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.graph import StateGraph, END
@@ -16,6 +24,8 @@ from pathlib import Path
 from src.skills import SkillStore
 from src.skill_tools import create_skill_tools
 from src.prompts import SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -105,24 +115,80 @@ def get_llm():
 
 
 # =============================================================================
-# Subagents
+# Subagents with Layer 3 (Specialist) Skills
 # =============================================================================
 
-research_agent = create_agent(
-    model=get_llm(),
-    tools=[],
-    system_prompt="You are a research specialist. Find and summarize information."
+# Each subagent has its OWN skill store with specialist skills (Layer 3)
+# They also have access to Layer 2 process skills (their role-specific view)
+
+SUBAGENT_SKILLS_DIRS = {
+    "research": Path(__file__).parent.parent / "skills" / "subagents" / "research",
+    "writing": Path(__file__).parent.parent / "skills" / "subagents" / "writing",
+    "code-generation": Path(__file__).parent.parent / "skills" / "code-generation",
+}
+
+# Also include the specialist skills from root level
+SPECIALIST_SKILLS_DIRS = {
+    "research": [
+        Path(__file__).parent.parent / "skills" / "research",
+        Path(__file__).parent.parent / "skills" / "subagents" / "research",
+    ],
+    "writing": [
+        Path(__file__).parent.parent / "skills" / "writing",
+        Path(__file__).parent.parent / "skills" / "subagents" / "writing",
+    ],
+    "code-generation": [
+        Path(__file__).parent.parent / "skills" / "code-generation",
+    ],
+}
+
+
+def create_subagent_skill_store(agent_name: str) -> SkillStore:
+    """Create a skill store for a specific subagent with its relevant skills."""
+    # For now, use the specialist skills from root level
+    # In production, you'd merge multiple directories
+    skills_dir = SPECIALIST_SKILLS_DIRS.get(agent_name, [Path(__file__).parent.parent / "skills" / agent_name])
+    
+    # Create store with the primary skills directory
+    store = SkillStore(skills_dir[0])
+    store.scan()
+    return store
+
+
+def create_subagent(agent_name: str, system_prompt: str):
+    """Create a subagent with its own specialist skills (Layer 3)."""
+    skill_store = create_subagent_skill_store(agent_name)
+    skill_tools = create_skill_tools(skill_store)
+    
+    logger.info(f"Created subagent '{agent_name}' with {len(skill_store.get_skill_names())} skills")
+    
+    return create_agent(
+        model=get_llm(),
+        tools=skill_tools,
+        system_prompt=system_prompt,
+    )
+
+
+# Create subagents with their own specialist skills
+research_agent = create_subagent(
+    "research",
+    "You are a research specialist. Use your research skill to find and summarize information."
 )
 
-writer_agent = create_agent(
-    model=get_llm(),
-    tools=[],
-    system_prompt="You are a writing specialist. Create and edit content."
+writer_agent = create_subagent(
+    "writing",
+    "You are a writing specialist. Create and edit content for various purposes."
+)
+
+code_generation_agent = create_subagent(
+    "code-generation",
+    "You are a code generation specialist. Write, review, and debug code."
 )
 
 SUBAGENTS = {
     "research": research_agent,
-    "writer": writer_agent,
+    "writing": writer_agent,
+    "code-generation": code_generation_agent,
 }
 
 
@@ -133,18 +199,18 @@ SUBAGENTS = {
 @tool
 def start_job(agent_name: str, description: str) -> str:
     """Start a background job and return a job ID.
-    
+
     Args:
-        agent_name: Name of the subagent to use ('research' or 'writer')
+        agent_name: Name of the subagent to use ('research', 'writing', or 'code-generation')
         description: Detailed description of what the job should accomplish
     """
     if agent_name not in SUBAGENTS:
         return f"Unknown agent: {agent_name}. Available: {list(SUBAGENTS.keys())}"
-    
+
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     job_storage.create_job(job_id)
     job_storage.update_status(job_id, "running")
-    
+
     def run_job():
         try:
             agent = SUBAGENTS[agent_name]
@@ -155,18 +221,18 @@ def start_job(agent_name: str, description: str) -> str:
                     "messages": [{"role": "user", "content": description}]
                 }))
                 job_storage.update_status(
-                    job_id, "completed", 
+                    job_id, "completed",
                     result=result["messages"][-1].content
                 )
             finally:
                 loop.close()
         except Exception as e:
             job_storage.update_status(job_id, "failed", error=str(e))
-    
+
     thread = threading.Thread(target=run_job, daemon=True, name=f"job_{job_id}")
     job_storage.register_thread(job_id, thread)
     thread.start()
-    
+
     return f"Job started: {job_id}. Use check_status to monitor progress."
 
 
@@ -217,34 +283,65 @@ def get_result(job_id: str) -> str:
 
 
 # =============================================================================
-# Skills System
+# Skills System - 3-Layer Architecture
 # =============================================================================
 
-# Initialize skill store and tools
+# Layer 1: Supervisor Capability Catalog (knows what subagents can do)
+# Layer 2: Process Skills (same process, different views per role)
+# Layer 3: Specialist Skills (subagent execution expertise)
+
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
-skill_store = SkillStore(SKILLS_DIR)
-skill_store.scan()
-skill_tools = create_skill_tools(skill_store)
 
-logger = logging.getLogger(__name__)
+# Supervisor gets Layer 1 (capabilities) + Layer 2 (orchestration processes)
+SUPERVISOR_SKILLS_DIRS = [
+    SKILLS_DIR / "supervisor" / "capabilities",  # Layer 1
+    SKILLS_DIR / "supervisor" / "processes",     # Layer 2 (supervisor view)
+]
+
+
+def create_supervisor_skill_store() -> SkillStore:
+    """Create skill store for supervisor with Layer 1 and Layer 2 skills.
+    
+    The supervisor needs:
+    - Layer 1: Capability catalog (what subagents can do)
+    - Layer 2: Process skills from orchestration perspective (when/how to delegate)
+    """
+    # For simplicity, we'll scan the entire supervisor directory
+    # In production, you'd want to be more selective
+    store = SkillStore(SKILLS_DIR / "supervisor")
+    store.scan()
+    return store
+
+
+# Initialize supervisor skill store
+supervisor_skill_store = create_supervisor_skill_store()
+supervisor_skill_tools = create_skill_tools(supervisor_skill_store)
+
+logger.info(f"Supervisor loaded with {len(supervisor_skill_store.get_skill_names())} skills")
+logger.info(f"Supervisor skills: {supervisor_skill_store.get_skill_names()}")
 
 
 # =============================================================================
-# Supervisor Agent
+# Supervisor Agent (Layer 1 + Layer 2 skills only)
 # =============================================================================
 
-# Combine skill tools with existing job tools
-all_tools = [start_job, check_status, get_result] + skill_tools
+# Supervisor has:
+# - Job management tools (start_job, check_status, get_result)
+# - Layer 1 skill tools (capability catalog)
+# - Layer 2 skill tools (orchestration processes)
+# Supervisor does NOT have Layer 3 (specialist) skills - those belong to subagents!
 
-# Build system prompt with skill catalog
-skill_catalog = skill_store.get_skill_catalog()
+supervisor_tools = [start_job, check_status, get_result] + supervisor_skill_tools
+
+# Build system prompt with Layer 1 capability catalog
+capability_catalog = supervisor_skill_store.get_skill_catalog()
 
 supervisor_agent = create_agent(
     model=get_llm(),
-    tools=all_tools,
+    tools=supervisor_tools,
     system_prompt=SYSTEM_PROMPT.format(
         current_time=datetime.now().isoformat(),
-        skill_catalog=skill_catalog if skill_catalog else "No skills currently available."
+        skill_catalog=capability_catalog if capability_catalog else "No skills currently available."
     ),
 )
 
