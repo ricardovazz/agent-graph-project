@@ -14,7 +14,7 @@ async def test_three_tool_pattern():
     # Step 1: Start job
     print("\n[1] Starting background job (writer agent)...")
     result = await app.ainvoke({
-        "messages": [HumanMessage(content="Start a background job with the writer agent to write a haiku about coding")]
+        "messages": [HumanMessage(content="Research and write about AI")]
     })
     for msg in result["messages"]:
         print(f"{msg.type}: {msg.content}")
